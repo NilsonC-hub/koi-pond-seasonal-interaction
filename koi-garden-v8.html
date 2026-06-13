@@ -144,6 +144,7 @@ function setSeason(s){
   renderBackground();renderPads();initLeaves();
   document.querySelectorAll('.schip').forEach(el=>el.classList.toggle('sel',el.dataset.s===s));
   if(AC)updateAmbient();
+  if(AC)setBGMSeason(s);
 }
 
 /* ---------- 天气 ---------- */
@@ -1738,9 +1739,18 @@ const SOUND_DATA={"drop": "UklGRkQ3AABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0Y
 const SND_P={master:.35,amb:.55,rain:.5,night:.35,
   drop:.5,plop:.6,nibble:.25,kiss:.16,clack:.85,chime:.5,pour:.5,
   cicada:.06,cricket:.05,wet:.18};
+const BGM_SRC={
+  spring:'assets/audio/bgm/spring_loop.mp3',
+  summer:'assets/audio/bgm/summer_loop.mp3',
+  autumn:'assets/audio/bgm/autumn_loop.mp3',
+  winter:'assets/audio/bgm/winter_loop.mp3'
+};
+const BGM_P={vol:.24,fade:2.4,offFade:.6};
 let AC=null,masterG=null,sfxG=null,ambG=null,noiseBuf=null;
 let rainG=null,nightG=null;
 let soundOn=true,lastNibbleT=0,cicadaBusy=false;
+let bgmSeason=null,bgmActive=null;
+const bgmFadeTimers=new WeakMap();
 const SND={};
 function b64buf(b64){
   const bin=atob(b64),u=new Uint8Array(bin.length);
@@ -1774,6 +1784,7 @@ function initAudio(){
   nightG=mkAmbLoop(200,'lowpass',.6);
   setInterval(ambSchedule,650);
   updateAmbient();
+  setBGMSeason(SEASON);
 }
 function play(name,gain,rate){
   if(!AC||!SND[name]||!soundOn)return;
@@ -1801,6 +1812,43 @@ function updateAmbient(){
   if(!AC)return;
   fadeTo(rainG,WEATHER==='rain'?SND_P.rain:0,2);
   fadeTo(nightG,(WEATHER==='moon'||WEATHER==='snow')?SND_P.night:0,2.5);
+}
+function mkBGM(season){
+  const a=new Audio(BGM_SRC[season]);
+  a.loop=true;
+  a.preload='auto';
+  a.volume=0;
+  return a;
+}
+function fadeAudio(el,to,sec,done){
+  if(!el){if(done)done();return;}
+  const oldTimer=bgmFadeTimers.get(el);
+  if(oldTimer)clearInterval(oldTimer);
+  const from=el.volume, start=performance.now(), dur=Math.max(.01,sec||1)*1000;
+  const timer=setInterval(()=>{
+    const k=Math.min(1,(performance.now()-start)/dur);
+    el.volume=from+(to-from)*k;
+    if(k>=1){
+      clearInterval(timer);bgmFadeTimers.delete(el);
+      el.volume=to;
+      if(done)done();
+    }
+  },33);
+  bgmFadeTimers.set(el,timer);
+}
+function stopBGM(sec){
+  if(!bgmActive)return;
+  const old=bgmActive;
+  bgmActive=null;bgmSeason=null;
+  fadeAudio(old,0,sec||BGM_P.offFade,()=>{old.pause();old.src='';});
+}
+function setBGMSeason(season){
+  if(!AC||!soundOn)return;
+  if(bgmSeason===season&&bgmActive)return;
+  const next=mkBGM(season), prev=bgmActive;
+  bgmActive=next;bgmSeason=season;
+  next.play().then(()=>fadeAudio(next,BGM_P.vol,BGM_P.fade)).catch(()=>{});
+  if(prev)fadeAudio(prev,0,BGM_P.fade,()=>{prev.pause();prev.src='';});
 }
 function sndDrop(){play('drop',SND_P.drop,.94+Math.random()*.12);}
 function sndPlop(fd){play('plop',SND_P.plop,(fd?1.25-fd.sink*.03:1)+(Math.random()-.5)*.06);}
@@ -1854,6 +1902,7 @@ function ambSchedule(){
 function toggleSound(){
   soundOn=!soundOn;
   if(AC)fadeTo(masterG,soundOn?SND_P.master:0,.4);
+  if(soundOn&&AC)setBGMSeason(SEASON);else stopBGM(BGM_P.offFade);
   document.getElementById('sndOn').style.display=soundOn?'block':'none';
   document.getElementById('sndOff').style.display=soundOn?'none':'block';
   document.getElementById('soundChip').classList.toggle('sel',soundOn);
