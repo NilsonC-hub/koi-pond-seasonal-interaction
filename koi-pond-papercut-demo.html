@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>錦鯉の池 · 紙 — Paper Koi Pond (最小样)</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#f2ede3;height:100%;
+    font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif SC",serif;}
+  canvas{display:block;}
+  #foodChip{
+    position:fixed;top:18px;right:20px;padding:8px 14px;
+    background:#fbf8f0;border-radius:14px;
+    box-shadow:0 3px 10px rgba(40,60,90,.18), 0 1px 0 rgba(255,255,255,.8) inset;
+    display:flex;align-items:center;gap:7px;user-select:none;
+    color:#6a6253;font-size:13px;letter-spacing:2px;}
+  .pellet{width:9px;height:9px;border-radius:50%;background:#d9b886;
+    box-shadow:0 1px 2px rgba(80,60,30,.3);transition:opacity .4s, transform .4s;}
+  .pellet.used{opacity:.18;transform:scale(.7);}
+  #hint{
+    position:fixed;bottom:26px;left:50%;transform:translateX(-50%);
+    padding:7px 18px;background:rgba(251,248,240,.85);border-radius:14px;
+    box-shadow:0 3px 10px rgba(40,60,90,.15);
+    color:#7a7263;font-size:13px;letter-spacing:3px;user-select:none;
+    transition:opacity 1.2s;}
+  #hint.fade{opacity:0;}
+</style>
+</head>
+<body>
+<canvas id="pond"></canvas>
+<div id="foodChip"><span>餌</span></div>
+<div id="hint">水面をクリック — 波紋と餌やり</div>
+<script>
+"use strict";
+const canvas = document.getElementById('pond');
+const ctx = canvas.getContext('2d');
+let W=0, H=0, CX=0, CY=0, RX=0, RY=0;
+
+/* ---------- 纸雕分层水面 ---------- */
+// 由浅到深的纸层颜色（参考 Pinterest 纸雕配色）
+const LAYER_COLORS = ['#dde9ef','#bcd4e3','#95b9d4','#719ac2','#5379a8','#3f618f'];
+const LAYER_SCALES = [1.0,.875,.75,.625,.50,.375];
+const layerSeeds = LAYER_COLORS.map((_,i)=>[i*2.13+0.7, i*1.71+2.9, i*2.77+1.3]);
+
+function blobPath(c, cx, cy, rx, ry, seed){
+  c.beginPath();
+  const N=120;
+  for(let i=0;i<=N;i++){
+    const th=i/N*Math.PI*2;
+    const r=1 + .055*Math.sin(3*th+seed[0]) + .045*Math.sin(5*th+seed[1]) + .03*Math.sin(8*th+seed[2]);
+    const x=cx+Math.cos(th)*rx*r, y=cy+Math.sin(th)*ry*r;
+    i===0?c.moveTo(x,y):c.lineTo(x,y);
+  }
+  c.closePath();
+}
+
+let bgCanvas=null;
+function renderBackground(){
+  bgCanvas=document.createElement('canvas');
+  bgCanvas.width=W; bgCanvas.height=H;
+  const b=bgCanvas.getContext('2d');
+  b.fillStyle='#f2ede3'; b.fillRect(0,0,W,H);          // 纸框底色
+  for(let i=0;i<LAYER_COLORS.length;i++){
+    b.save();
+    b.shadowColor='rgba(30,50,90,.28)';
+    b.shadowBlur=14; b.shadowOffsetY=7;
+    blobPath(b, CX, CY, RX*LAYER_SCALES[i], RY*LAYER_SCALES[i], layerSeeds[i]);
+    b.fillStyle=LAYER_COLORS[i];
+    b.fill();
+    b.restore();
+  }
+  // 纸张细微颗粒
+  b.globalAlpha=.045;
+  for(let i=0;i<W*H/900;i++){
+    b.fillStyle=Math.random()<.5?'#223':'#fff';
+    b.fillRect(Math.random()*W, Math.random()*H, 1.2, 1.2);
+  }
+  b.globalAlpha=1;
+}
+
+/* ---------- 荷叶 / 睡莲（顶层静景） ---------- */
+let padCanvas=null;
+const PADS=[ // 相对坐标 (相对中心, 比例于 RX/RY)
+  {x:-.62,y:-.55,r:46,a:.4,lotus:false,c:'#7fae6e'},
+  {x:-.74,y:-.30,r:30,a:2.2,lotus:true ,c:'#8fba7a'},
+  {x: .60,y:-.62,r:38,a:1.1,lotus:false,c:'#74a565'},
+  {x: .74,y:-.40,r:26,a:3.6,lotus:true ,c:'#86b273'},
+  {x: .66,y: .55,r:42,a:5.1,lotus:false,c:'#7fae6e'},
+  {x:-.58,y: .60,r:34,a:2.8,lotus:true ,c:'#74a565'},
+  {x:-.05,y:-.78,r:28,a:4.4,lotus:false,c:'#8fba7a'},
+];
+function drawLotus(c,x,y,s){
+  const petal=(rr,col,n,rot)=>{
+    c.fillStyle=col;
+    for(let i=0;i<n;i++){
+      const a=i/n*Math.PI*2+rot;
+      c.save(); c.translate(x,y); c.rotate(a);
+      c.beginPath(); c.ellipse(rr*.62,0,rr*.55,rr*.24,0,0,Math.PI*2); c.fill();
+      c.restore();
+    }
+  };
+  c.save();
+  c.shadowColor='rgba(30,50,90,.3)'; c.shadowBlur=5; c.shadowOffsetY=3;
+  petal(s,'#eba8bb',8,0);
+  c.shadowColor='transparent';
+  petal(s*.62,'#f7d3dd',8,.39);
+  c.beginPath(); c.arc(x,y,s*.2,0,Math.PI*2); c.fillStyle='#f3e2a3'; c.fill();
+  c.restore();
+}
+function renderPads(){
+  padCanvas=document.createElement('canvas');
+  padCanvas.width=W; padCanvas.height=H;
+  const c=padCanvas.getContext('2d');
+  for(const p of PADS){
+    const x=CX+p.x*RX, y=CY+p.y*RY;
+    c.save();
+    c.shadowColor='rgba(30,50,90,.32)'; c.shadowBlur=7; c.shadowOffsetY=5;
+    c.beginPath();
+    c.moveTo(x,y);
+    c.arc(x,y,p.r,p.a+.5,p.a+Math.PI*2-.25);   // 带缺口的荷叶
+    c.closePath();
+    c.fillStyle=p.c; c.fill();
+    c.restore();
+    // 叶脉
+    c.strokeStyle='rgba(255,255,255,.25)'; c.lineWidth=1;
+    for(let i=0;i<6;i++){
+      const a=p.a+.6+i*(Math.PI*2-.95)/6;
+      c.beginPath(); c.moveTo(x,y);
+      c.lineTo(x+Math.cos(a)*p.r*.85, y+Math.sin(a)*p.r*.85); c.stroke();
+    }
+    if(p.lotus) drawLotus(c, x+p.r*.55, y-p.r*.5, p.r*.55);
+  }
+}
+
+/* ---------- 锦鲤 ---------- */
+const KOI_VARIANTS=[
+  {base:'#f7f3ec', patch:['#d94f35','#d94f35']},                 // 红白
+  {base:'#e8913f', patch:[]},                                    // 黄金
+  {base:'#f7f3ec', patch:['#d94f35'], tancho:true},              // 丹顶
+  {base:'#f3ead9', patch:['#d94f35','#2e2a28','#e9b84d']},       // 三色
+  {base:'#f7f3ec', patch:['#2e2a28','#d94f35']},                 // 昭和
+  {base:'#e8913f', patch:['#d94f35']},
+];
+const R_PROFILE=[.13,.185,.21,.20,.165,.115,.07,.042];
+
+function makeKoi(i){
+  const v=KOI_VARIANTS[i%KOI_VARIANTS.length];
+  const L=52+Math.random()*22;
+  const patches=v.patch.map((col,k)=>({
+    col, sx:.32-.5*Math.random()-k*.12,
+    sy:(Math.random()-.5)*.16, r:.13+Math.random()*.10
+  }));
+  if(v.tancho) patches.push({col:'#d94f35', sx:.36, sy:0, r:.10});
+  const a=Math.random()*Math.PI*2, rr=Math.sqrt(Math.random())*.7;
+  return {
+    L, base:v.base, patches,
+    x:CX+Math.cos(a)*RX*rr, y:CY+Math.sin(a)*RY*rr,
+    heading:Math.random()*Math.PI*2,
+    speed:16+Math.random()*10,
+    phase:Math.random()*Math.PI*2,
+    noiseT:Math.random()*100,
+    satiated:0, target:null,
+  };
+}
+let kois=[];
+
+function drawKoi(c,f,t){
+  const sway=Math.sin(t*3+f.phase);
+  c.save();
+  c.translate(f.x,f.y); c.rotate(f.heading);
+  const L=f.L, n=R_PROFILE.length;
+  const spine=[];
+  for(let i=0;i<n;i++){
+    const u=i/(n-1);
+    spine.push({
+      x:L*(.5-u),
+      y:Math.sin(t*3+f.phase-u*2.2)*L*.07*Math.pow(u,1.4),
+      r:R_PROFILE[i]*L
+    });
+  }
+  const tail=spine[n-1];
+  const tailA=Math.sin(t*3+f.phase-2.6)*.5;
+
+  // 尾鳍 + 胸鳍（纸片感：底色调淡）
+  c.save();
+  c.shadowColor='rgba(20,40,80,.25)'; c.shadowBlur=4; c.shadowOffsetY=3;
+  c.fillStyle=f.base; c.globalAlpha=.82;
+  for(const s of [1,-1]){
+    c.beginPath();
+    c.moveTo(tail.x+2,tail.y);
+    c.quadraticCurveTo(tail.x-L*.22, tail.y+s*L*.06+tailA*L*.18,
+                       tail.x-L*.34+Math.abs(tailA)*4, tail.y+s*L*.16+tailA*L*.30);
+    c.quadraticCurveTo(tail.x-L*.16, tail.y+s*L*.05+tailA*L*.12, tail.x+2, tail.y);
+    c.fill();
+  }
+  const pf=spine[2];
+  for(const s of [1,-1]){
+    c.save();
+    c.translate(pf.x, pf.y+s*pf.r*.9);
+    c.rotate(s*(.95+sway*.12));
+    c.beginPath(); c.ellipse(L*.07,0,L*.11,L*.045,0,0,Math.PI*2); c.fill();
+    c.restore();
+  }
+  c.restore();
+
+  // 身体剪影（带纸片投影）
+  const bodyPath=()=>{ c.beginPath();
+    for(const s of spine){ c.moveTo(s.x+s.r,s.y); c.arc(s.x,s.y,s.r,0,Math.PI*2); } };
+  c.save();
+  c.shadowColor='rgba(20,40,80,.3)'; c.shadowBlur=5; c.shadowOffsetY=4;
+  bodyPath(); c.fillStyle=f.base; c.fill();
+  c.restore();
+  // 斑纹（裁剪进身体）
+  c.save();
+  bodyPath(); c.clip();
+  for(const p of f.patches){
+    c.beginPath();
+    c.ellipse(p.sx*L, p.sy*L + Math.sin(t*3+f.phase-(.5-p.sx)*2.2)*L*.05,
+              p.r*L*1.45, p.r*L, .3, 0, Math.PI*2);
+    c.fillStyle=p.col; c.fill();
+  }
+  c.restore();
+  // 眼睛
+  c.fillStyle='#2b2b2b';
+  c.beginPath(); c.arc(L*.40, L*.085,1.8,0,Math.PI*2); c.arc(L*.40,-L*.085,1.8,0,Math.PI*2); c.fill();
+  c.restore();
+}
+
+/* ---------- 涟漪（克制：上限 4，自然淡出） ---------- */
+const ripples=[];
+function addRipple(x,y){
+  if(ripples.length>=4) ripples.shift();
+  ripples.push({x,y,t0:perf()});
+}
+function drawRipples(t){
+  for(let i=ripples.length-1;i>=0;i--){
+    const r=ripples[i], u=(t-r.t0)/2.4;
+    if(u>=1){ripples.splice(i,1);continue;}
+    const ease=1-Math.pow(1-u,2.2);
+    ctx.save();
+    ctx.strokeStyle=`rgba(235,244,250,${.55*(1-u)})`;
+    ctx.lineWidth=2.5*(1-u*.5);
+    ctx.beginPath(); ctx.arc(r.x,r.y,12+ease*85,0,Math.PI*2); ctx.stroke();
+    ctx.strokeStyle=`rgba(235,244,250,${.3*(1-u)})`;
+    ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(r.x,r.y,6+ease*52,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+/* ---------- 投喂（数量有限 + 冷却） ---------- */
+const MAX_FOOD=5, REGEN_MS=15000, COOLDOWN=600;
+let foodLeft=MAX_FOOD, lastCast=-1e9, lastRegen=0;
+const pellets=[];
+const chip=document.getElementById('foodChip');
+const pelletEls=[];
+for(let i=0;i<MAX_FOOD;i++){
+  const d=document.createElement('div'); d.className='pellet';
+  chip.appendChild(d); pelletEls.push(d);
+}
+function refreshChip(){ pelletEls.forEach((d,i)=>d.classList.toggle('used', i>=foodLeft)); }
+refreshChip();
+
+function castFood(x,y,t){
+  if(foodLeft<=0 || t*1000-lastCast<COOLDOWN) return false;
+  lastCast=t*1000; foodLeft--; refreshChip();
+  pellets.push({x,y,t0:t,hp:3});
+  return true;
+}
+function drawPellets(t){
+  for(let i=pellets.length-1;i>=0;i--){
+    const p=pellets[i], age=t-p.t0;
+    if(age>8||p.hp<=0){pellets.splice(i,1);continue;}
+    const sink=Math.min(age/8,1);
+    ctx.save();
+    ctx.globalAlpha=1-Math.pow(sink,3);
+    ctx.shadowColor='rgba(20,40,80,.3)'; ctx.shadowBlur=3; ctx.shadowOffsetY=2;
+    ctx.fillStyle='#dfc08c';
+    ctx.beginPath(); ctx.arc(p.x,p.y,4.2*(1-sink*.4),0,Math.PI*2); ctx.fill();
+    // 小气泡
+    ctx.shadowColor='transparent';
+    ctx.strokeStyle='rgba(255,255,255,.4)';
+    for(let k=0;k<2;k++){
+      const bu=(age*.6+k*.5)%1;
+      ctx.globalAlpha=(1-bu)*.5*(1-sink);
+      ctx.beginPath(); ctx.arc(p.x+(k?6:-5), p.y-bu*22, 2,0,Math.PI*2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+/* ---------- 鱼群行为 ---------- */
+function updateKoi(f,dt,t){
+  let steer=0, speedMul=1;
+  // 觅食
+  if(t>f.satiated && pellets.length){
+    let best=null,bd=1e9;
+    for(const p of pellets){
+      const d=Math.hypot(p.x-f.x,p.y-f.y);
+      if(d<bd&&d<420){bd=d;best=p;}
+    }
+    if(best){
+      const want=Math.atan2(best.y-f.y,best.x-f.x);
+      let da=((want-f.heading+Math.PI*3)%(Math.PI*2))-Math.PI;
+      steer=da*2.2; speedMul=1.7;
+      if(bd<16){ best.hp--; f.satiated=t+9; addRipple(best.x,best.y); speedMul=.4; }
+      else if(bd<60) speedMul=.8;   // 靠近时放慢，停留感
+    }
+  }
+  // 漫游噪声
+  f.noiseT+=dt;
+  steer+=Math.sin(f.noiseT*.45+f.phase*7)*.45;
+  // 边界（椭圆内回转）
+  const nx=(f.x-CX)/RX, ny=(f.y-CY)/RY, nd=Math.hypot(nx,ny);
+  if(nd>.86){
+    const back=Math.atan2(CY-f.y,CX-f.x);
+    let da=((back-f.heading+Math.PI*3)%(Math.PI*2))-Math.PI;
+    steer+=da*(nd-.86)*22;
+  }
+  f.heading+=Math.max(-2.2,Math.min(2.2,steer))*dt;
+  const sp=f.speed*speedMul;
+  f.x+=Math.cos(f.heading)*sp*dt;
+  f.y+=Math.sin(f.heading)*sp*dt;
+}
+
+/* ---------- 主循环 ---------- */
+const perf=()=>performance.now()/1000;
+let last=perf();
+function frame(){
+  const t=perf(), dt=Math.min(t-last,.05); last=t;
+  // 食物回复
+  if(foodLeft<MAX_FOOD && t*1000-lastRegen>REGEN_MS){
+    foodLeft++; lastRegen=t*1000; refreshChip();
+  } else if(foodLeft===MAX_FOOD) lastRegen=t*1000;
+
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(bgCanvas,0,0);
+  drawRipples(t);
+  for(const f of kois){ updateKoi(f,dt,t); drawKoi(ctx,f,t); }
+  drawPellets(t);
+  ctx.drawImage(padCanvas,0,0);
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 交互 ---------- */
+let hinted=false;
+canvas.addEventListener('pointerdown',e=>{
+  const x=e.clientX,y=e.clientY, t=perf();
+  // 只在水域内响应
+  const nx=(x-CX)/RX, ny=(y-CY)/RY;
+  if(Math.hypot(nx,ny)>1) return;
+  addRipple(x,y);
+  castFood(x,y,t);
+  if(!hinted){hinted=true;document.getElementById('hint').classList.add('fade');}
+});
+
+function resize(){
+  W=canvas.width=innerWidth; H=canvas.height=innerHeight;
+  CX=W/2; CY=H/2; RX=W*.46; RY=H*.44;
+  renderBackground(); renderPads();
+}
+addEventListener('resize',resize);
+resize();
+kois=Array.from({length:6},(_,i)=>makeKoi(i));
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

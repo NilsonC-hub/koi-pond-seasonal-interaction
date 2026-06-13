@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>錦鯉の池 · 紙 V2 — Paper Koi Pond</title>
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:#e9e2d2;height:100%;
+    font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif SC",serif;}
+  canvas{display:block;position:fixed;left:0;top:0;}
+  #overlay{pointer-events:none;}
+  #foodChip{
+    position:fixed;top:18px;right:20px;padding:8px 14px;z-index:10;
+    background:#fbf8f0;border-radius:14px;
+    box-shadow:0 3px 10px rgba(40,60,90,.18), 0 1px 0 rgba(255,255,255,.8) inset;
+    display:flex;align-items:center;gap:7px;user-select:none;
+    color:#6a6253;font-size:13px;letter-spacing:2px;}
+  .pellet{width:9px;height:9px;border-radius:50%;background:#d9b886;
+    box-shadow:0 1px 2px rgba(80,60,30,.3);transition:opacity .4s, transform .4s;}
+  .pellet.used{opacity:.18;transform:scale(.7);}
+  #hint{
+    position:fixed;bottom:26px;left:50%;transform:translateX(-50%);z-index:10;
+    padding:7px 18px;background:rgba(251,248,240,.85);border-radius:14px;
+    box-shadow:0 3px 10px rgba(40,60,90,.15);
+    color:#7a7263;font-size:13px;letter-spacing:3px;user-select:none;
+    transition:opacity 1.2s;}
+  #hint.fade{opacity:0;}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="overlay"></canvas>
+<div id="foodChip"><span>餌</span></div>
+<div id="hint">水面をクリック — 波紋と餌やり</div>
+<script>
+"use strict";
+/* ============================================================
+   錦鯉の池 V3
+   - 纸雕岸（砂砾+苔+石灯笼+枫枝+鹿威し）
+   - WebGL 高度场水波（大阻尼，快速回静）
+   - 脊线跟随锦鲤（斑纹刚性贴体、飘带尾鳍）
+   ============================================================ */
+const glCanvas = document.getElementById('gl');
+const ovCanvas = document.getElementById('overlay');
+const ovCtx = ovCanvas.getContext('2d');
+let W=0,H=0,CX=0,CY=0,RX=0,RY=0;
+const perf=()=>performance.now()/1000;
+
+/* ---------- 水域形状（最大蓝层即水岸线） ---------- */
+const WATER_COLORS=['#c3d8e4','#a3c2d8','#82a8c8','#6589b4','#4d6da0','#3c5a8c'];
+const WATER_SCALES=[.965,.835,.705,.575,.45,.33];
+// 超椭圆（方圆形）基底：n 越大越方
+const SQ_N=3.3;
+function superR(th){
+  const c=Math.abs(Math.cos(th)),s=Math.abs(Math.sin(th));
+  return Math.pow(Math.pow(c,SQ_N)+Math.pow(s,SQ_N),-1/SQ_N);
+}
+function shapeR(th,seed,amp){
+  return superR(th)*(1+(blobR(th,seed)-1)*(amp===undefined?1:amp));
+}
+const SEED=[[0.7,2.9,1.3],[2.83,4.61,4.07],[4.96,6.32,6.84],[7.09,8.03,9.61],[9.22,9.74,12.38],[11.35,11.45,15.15]];
+function blobR(th,seed){
+  return 1+.055*Math.sin(3*th+seed[0])+.045*Math.sin(5*th+seed[1])+.03*Math.sin(8*th+seed[2]);
+}
+function blobPath(c,cx,cy,rx,ry,seed,amp){
+  c.beginPath();
+  const N=140;
+  for(let i=0;i<=N;i++){
+    const th=i/N*Math.PI*2, r=shapeR(th,seed,amp);
+    const x=cx+Math.cos(th)*rx*r, y=cy+Math.sin(th)*ry*r;
+    i===0?c.moveTo(x,y):c.lineTo(x,y);
+  }
+  c.closePath();
+}
+// 归一化水域半径（<1 在水内），以最外水层为准
+function waterND(x,y){
+  const dx=(x-CX)/(RX*WATER_SCALES[0]), dy=(y-CY)/(RY*WATER_SCALES[0]);
+  const th=Math.atan2(dy,dx);
+  return Math.hypot(dx,dy)/shapeR(th,SEED[0],.7);
+}
+
+/* ---------- 静态背景：岸 + 水层 ---------- */
+let bgCanvas=null;
+function rnd(seed){ let s=seed; return ()=>(s=(s*9301+49297)%233280)/233280; }
+
+function drawPebbleCluster(c,x,y,n,sc,rng){
+  for(let i=0;i<n;i++){
+    const a=rng()*Math.PI*2, d=rng()*sc*2.2;
+    const px=x+Math.cos(a)*d, py=y+Math.sin(a)*d*.7;
+    const r=sc*(.4+rng()*.6);
+    c.save();
+    c.shadowColor='rgba(60,70,60,.3)';c.shadowBlur=4;c.shadowOffsetY=3;
+    c.fillStyle=['#b9bdb4','#a8aea6','#c4c6bd','#9aa39c'][i%4];
+    c.beginPath();c.ellipse(px,py,r,r*.78,rng()*3,0,Math.PI*2);c.fill();
+    c.restore();
+  }
+}
+function drawMoss(c,x,y,r,rng){
+  c.save();
+  c.globalAlpha=.5;
+  for(let i=0;i<5;i++){
+    c.fillStyle=['#8aa06b','#7c945e','#96ab76'][i%3];
+    c.beginPath();
+    c.ellipse(x+(rng()-.5)*r*1.6, y+(rng()-.5)*r, r*(.5+rng()*.4), r*(.3+rng()*.3), rng()*3,0,Math.PI*2);
+    c.fill();
+  }
+  c.restore();
+}
+function drawLantern(c,x,y,s){ // 石灯笼（俯视微侧，纸雕层叠）
+  c.save();
+  c.translate(x,y);
+  c.shadowColor='rgba(50,60,70,.35)';c.shadowBlur=8;c.shadowOffsetY=6;
+  // 底座
+  c.fillStyle='#9aa0a2';
+  c.beginPath();c.ellipse(0,s*.55,s*.62,s*.30,0,0,Math.PI*2);c.fill();
+  // 柱
+  c.fillStyle='#aab0b0';
+  c.fillRect(-s*.13,-s*.05,s*.26,s*.62);
+  // 火袋（暖窗）
+  c.fillStyle='#b4bab9';
+  c.beginPath();c.ellipse(0,-s*.18,s*.40,s*.26,0,0,Math.PI*2);c.fill();
+  c.shadowColor='transparent';
+  c.fillStyle='#e8c98a';
+  c.beginPath();c.ellipse(0,-s*.18,s*.20,s*.13,0,0,Math.PI*2);c.fill();
+  // 笠（六角纸片）
+  c.shadowColor='rgba(50,60,70,.35)';c.shadowBlur=6;c.shadowOffsetY=4;
+  c.fillStyle='#848c8e';
+  c.beginPath();
+  for(let i=0;i<6;i++){
+    const a=i/6*Math.PI*2-Math.PI/2;
+    const px=Math.cos(a)*s*.58, py=-s*.42+Math.sin(a)*s*.34;
+    i===0?c.moveTo(px,py):c.lineTo(px,py);
+  }
+  c.closePath();c.fill();
+  // 宝珠
+  c.fillStyle='#9aa0a2';
+  c.beginPath();c.arc(0,-s*.50,s*.10,0,Math.PI*2);c.fill();
+  c.restore();
+}
+function mapleLeafPath(c,x,y,s,rot){
+  c.save();c.translate(x,y);c.rotate(rot);
+  c.beginPath();
+  for(let i=0;i<5;i++){
+    const a=-Math.PI/2+(i-2)*.62;
+    const tipX=Math.cos(a)*s, tipY=Math.sin(a)*s;
+    c.moveTo(0,s*.25);
+    c.quadraticCurveTo(Math.cos(a-.28)*s*.55, Math.sin(a-.28)*s*.55, tipX, tipY);
+    c.quadraticCurveTo(Math.cos(a+.28)*s*.55, Math.sin(a+.28)*s*.55, 0, s*.25);
+  }
+  c.fill();
+  c.restore();
+}
+function drawBranch(c){ // 枫枝从右上角探入
+  c.save();
+  c.strokeStyle='#6e4f38';c.lineCap='round';
+  c.shadowColor='rgba(50,50,60,.3)';c.shadowBlur=6;c.shadowOffsetY=5;
+  c.lineWidth=7;
+  c.beginPath();c.moveTo(W+10,H*.04);
+  c.quadraticCurveTo(W*.88,H*.075,W*.80,H*.16);c.stroke();
+  c.lineWidth=4;
+  c.beginPath();c.moveTo(W*.875,H*.085);
+  c.quadraticCurveTo(W*.82,H*.09,W*.775,H*.06);c.stroke();
+  const rng=rnd(7);
+  const leafCols=['#c8553d','#d97742','#b94a35'];
+  for(let i=0;i<11;i++){
+    c.fillStyle=leafCols[i%3];
+    const t=i/10;
+    const bx=W*(.98-.18*t)+(rng()-.5)*40, by=H*(.05+.11*t)+(rng()-.5)*30;
+    mapleLeafPath(c,bx,by,9+rng()*5,rng()*6.28);
+  }
+  c.restore();
+}
+function renderBackground(){
+  bgCanvas=document.createElement('canvas');
+  bgCanvas.width=W;bgCanvas.height=H;
+  const b=bgCanvas.getContext('2d');
+  // 岸：砂砾底
+  b.fillStyle='#ddd5bf';b.fillRect(0,0,W,H);
+  const rng=rnd(42);
+  // 砂砾颗粒
+  for(let i=0;i<W*H/420;i++){
+    b.fillStyle=rng()<.5?'rgba(160,150,120,.35)':'rgba(255,252,240,.5)';
+    const x=rng()*W,y=rng()*H;
+    b.fillRect(x,y,1.6,1.6);
+  }
+  // 苔斑（沿水岸线外侧）
+  for(let i=0;i<26;i++){
+    const th=rng()*Math.PI*2;
+    const rr=shapeR(th,SEED[0],.7)*(1.02+rng()*.07);
+    drawMoss(b, CX+Math.cos(th)*RX*WATER_SCALES[0]*rr, CY+Math.sin(th)*RY*WATER_SCALES[0]*rr, 16+rng()*22, rng);
+  }
+  // 水层（纸雕层叠）
+  for(let i=0;i<WATER_COLORS.length;i++){
+    b.save();
+    b.shadowColor='rgba(30,50,90,.28)';b.shadowBlur=14;b.shadowOffsetY=7;
+    blobPath(b,CX,CY,RX*WATER_SCALES[i],RY*WATER_SCALES[i],SEED[i],i===0?.7:1);
+    b.fillStyle=WATER_COLORS[i];b.fill();
+    b.restore();
+  }
+  // 岸上元素（沿边缘留白带）
+  drawPebbleCluster(b, W*.06, H*.88, 7, 12, rng);
+  drawPebbleCluster(b, W*.035, H*.52, 5, 9, rng);
+  drawPebbleCluster(b, W*.955, H*.38, 6, 10, rng);
+  drawLantern(b, W*.048, H*.16, 44);
+  // 纸张颗粒（全画面极淡）
+  b.globalAlpha=.04;
+  for(let i=0;i<W*H/900;i++){
+    b.fillStyle=rng()<.5?'#223':'#fff';
+    b.fillRect(rng()*W,rng()*H,1.2,1.2);
+  }
+  b.globalAlpha=1;
+}
+
+/* ---------- 荷叶/睡莲/枫枝（不受水波扭曲的上层） ---------- */
+let padCanvas=null;
+const PADS=[
+  {x:-.59,y:-.50,r:46,a:.4 ,lotus:false,c:'#7fae6e'},
+  {x:-.71,y:-.19,r:30,a:2.2,lotus:true ,c:'#8fba7a'},
+  {x: .61,y:-.47,r:38,a:1.1,lotus:false,c:'#74a565'},
+  {x: .73,y:-.17,r:26,a:3.6,lotus:true ,c:'#86b273'},
+  {x: .59,y: .54,r:42,a:5.1,lotus:false,c:'#7fae6e'},
+  {x:-.57,y: .59,r:34,a:2.8,lotus:true ,c:'#74a565'},
+  {x:-.02,y:-.73,r:28,a:4.4,lotus:false,c:'#8fba7a'},
+];
+function drawLotus(c,x,y,s){
+  const petal=(rr,col,n,rot)=>{
+    c.fillStyle=col;
+    for(let i=0;i<n;i++){
+      const a=i/n*Math.PI*2+rot;
+      c.save();c.translate(x,y);c.rotate(a);
+      c.beginPath();c.ellipse(rr*.62,0,rr*.55,rr*.24,0,0,Math.PI*2);c.fill();
+      c.restore();
+    }
+  };
+  c.save();
+  c.shadowColor='rgba(30,50,90,.3)';c.shadowBlur=5;c.shadowOffsetY=3;
+  petal(s,'#eba8bb',8,0);
+  c.shadowColor='transparent';
+  petal(s*.62,'#f7d3dd',8,.39);
+  c.beginPath();c.arc(x,y,s*.2,0,Math.PI*2);c.fillStyle='#f3e2a3';c.fill();
+  c.restore();
+}
+function renderPads(){
+  padCanvas=document.createElement('canvas');
+  padCanvas.width=W;padCanvas.height=H;
+  const c=padCanvas.getContext('2d');
+  for(const p of PADS){
+    const x=CX+p.x*RX,y=CY+p.y*RY;
+    c.save();
+    c.shadowColor='rgba(30,50,90,.32)';c.shadowBlur=7;c.shadowOffsetY=5;
+    c.beginPath();c.moveTo(x,y);
+    c.arc(x,y,p.r,p.a+.5,p.a+Math.PI*2-.25);
+    c.closePath();c.fillStyle=p.c;c.fill();
+    c.restore();
+    c.strokeStyle='rgba(255,255,255,.25)';c.lineWidth=1;
+    for(let i=0;i<6;i++){
+      const a=p.a+.6+i*(Math.PI*2-.95)/6;
+      c.beginPath();c.moveTo(x,y);
+      c.lineTo(x+Math.cos(a)*p.r*.85,y+Math.sin(a)*p.r*.85);c.stroke();
+    }
+    if(p.lotus) drawLotus(c,x+p.r*.55,y-p.r*.5,p.r*.55);
+  }
+  drawBranch(c);
+}
+
+/* ---------- 鹿威し（添水） ---------- */
+const shishi={px:0,py:0,angle:0,cycleT:0,period:30,phase:'idle',pourPt:{x:0,y:0}};
+function placeShishi(){
+  // 右下角岸上，竹口朝向池心
+  const th=.78;                     // 右下对角
+  const rr=shapeR(th,SEED[0],.7)*1.04;
+  shishi.px=CX+Math.cos(th)*RX*WATER_SCALES[0]*rr;
+  shishi.py=CY+Math.sin(th)*RY*WATER_SCALES[0]*rr;
+  const rr2=shapeR(th,SEED[0],.7)*.88;
+  shishi.pourPt.x=CX+Math.cos(th)*RX*WATER_SCALES[0]*rr2;
+  shishi.pourPt.y=CY+Math.sin(th)*RY*WATER_SCALES[0]*rr2;
+  shishi.period=14+Math.random()*8;
+  shishi.cycleT=shishi.period*Math.random()*.5;
+}
+function updateShishi(dt,t){
+  shishi.cycleT+=dt;
+  const T=shishi.cycleT, P=shishi.period;
+  if(T<P-3.4){ shishi.phase='idle'; shishi.angle=0; }
+  else if(T<P-2.9){ shishi.phase='tilt'; shishi.angle=(T-(P-3.4))/.5*.5; }
+  else if(T<P-.9){
+    shishi.phase='pour'; shishi.angle=.5;
+    // 注水扰动（更大涟漪）
+    disturb(shishi.pourPt.x+(Math.random()-.5)*14, shishi.pourPt.y+(Math.random()-.5)*14, .5);
+  }
+  else if(T<P){ shishi.phase='return'; shishi.angle=.5*(1-(T-(P-.9))/.9); }
+  else { shishi.cycleT=0; shishi.period=14+Math.random()*8; }
+}
+function drawShishi(c){
+  const {px,py,angle}=shishi;
+  const aim=Math.atan2(shishi.pourPt.y-py, shishi.pourPt.x-px);
+  c.save();
+  c.translate(px,py);
+  // 石
+  c.shadowColor='rgba(50,60,70,.3)';c.shadowBlur=5;c.shadowOffsetY=4;
+  c.fillStyle='#a8aea6';
+  c.beginPath();c.ellipse(12,16,16,10,.4,0,Math.PI*2);c.fill();
+  // 支架
+  c.fillStyle='#7a6448';
+  c.fillRect(-5,-4,10,22);
+  // 竹筒（绕支点摆动，口朝池心）
+  c.rotate(aim);
+  c.rotate(-angle);
+  c.fillStyle='#9fb86a';
+  c.beginPath();
+  c.roundRect(-26,-7,62,14,6);
+  c.fill();
+  c.fillStyle='#7e9a52';
+  c.fillRect(8,-7,4,14);c.fillRect(-14,-7,4,14);
+  c.restore();
+  // 倒水水流
+  if(shishi.phase==='pour'){
+    c.save();
+    c.strokeStyle='rgba(210,232,245,.75)';c.lineWidth=3;c.lineCap='round';
+    const sx=px+Math.cos(aim)*38, sy=py+Math.sin(aim)*38-6;
+    c.beginPath();c.moveTo(sx,sy);
+    c.quadraticCurveTo((sx+shishi.pourPt.x)/2+3, (sy+shishi.pourPt.y)/2,
+      shishi.pourPt.x+(Math.random()-.5)*3, shishi.pourPt.y);
+    c.stroke();
+    c.restore();
+  }
+}
+
+/* ---------- 漂浮枫叶（水面上，随波扭曲） ---------- */
+const floatLeaves=[];
+function initLeaves(){
+  floatLeaves.length=0;
+  for(let i=0;i<3;i++){
+    const a=Math.random()*Math.PI*2;
+    floatLeaves.push({
+      x:CX+Math.cos(a)*RX*.5, y:CY+Math.sin(a)*RY*.5,
+      rot:Math.random()*6.28, drift:Math.random()*6.28,
+      col:['#c8553d','#d97742','#b94a35'][i%3], s:9+Math.random()*4
+    });
+  }
+}
+function updateDrawLeaves(c,dt,t){
+  for(const L of floatLeaves){
+    L.drift+=dt*.13;
+    L.x+=Math.cos(L.drift)*3.5*dt; L.y+=Math.sin(L.drift*.8)*2.8*dt;
+    L.rot+=dt*.06;
+    if(waterND(L.x,L.y)>.92){ // 漂回
+      L.x+=(CX-L.x)*dt*.05; L.y+=(CY-L.y)*dt*.05;
+    }
+    c.save();
+    c.shadowColor='rgba(30,50,90,.25)';c.shadowBlur=3;c.shadowOffsetY=2;
+    c.fillStyle=L.col;
+    mapleLeafPath(c,L.x,L.y,L.s,L.rot);
+    c.restore();
+  }
+}
+
+/* ---------- 锦鲤（脊线跟随） ---------- */
+const KOI_VARIANTS=[
+  {base:'#f7f4ed',patches:[{u:.16,v:-.25,ru:.13,rv:.85,col:'#d24a31'},{u:.46,v:.3,ru:.15,rv:.9,col:'#d24a31'},{u:.74,v:-.1,ru:.10,rv:.8,col:'#d24a31'}]},          // 红白
+  {base:'#e8a13f',patches:[]},                                                                                                                                       // 黄金
+  {base:'#f7f4ed',patches:[{u:.10,v:0,ru:.085,rv:.7,col:'#d24a31'}]},                                                                                                // 丹顶
+  {base:'#f3edda',patches:[{u:.22,v:.25,ru:.13,rv:.85,col:'#d24a31'},{u:.5,v:-.3,ru:.14,rv:.85,col:'#2e2a28'},{u:.76,v:.15,ru:.09,rv:.8,col:'#e9b84d'}]},            // 三色
+  {base:'#f7f4ed',patches:[{u:.3,v:-.2,ru:.16,rv:.95,col:'#2e2a28'},{u:.62,v:.28,ru:.12,rv:.85,col:'#d24a31'}]},                                                     // 昭和
+  {base:'#f3efe6',patches:[],big:true},                                                                                                                              // 大白（仙）
+];
+const W_PROFILE=[.058,.108,.130,.135,.122,.098,.068,.040,.019];
+const NSEG=W_PROFILE.length;
+
+function makeKoi(i){
+  const v=KOI_VARIANTS[i%KOI_VARIANTS.length];
+  const L=v.big?92:(52+Math.random()*18);   // 稍短+加宽=鲤形而非鳅形
+  const a=Math.random()*Math.PI*2, rr=Math.sqrt(Math.random())*.6;
+  const x=CX+Math.cos(a)*RX*rr, y=CY+Math.sin(a)*RY*rr;
+  const heading=Math.random()*Math.PI*2;
+  // 预填轨迹（直线向后）
+  const trail=[];
+  for(let k=0;k<48;k++) trail.push({x:x-Math.cos(heading)*k*3, y:y-Math.sin(heading)*k*3});
+  return {
+    L, base:v.base, patches:v.patches, big:!!v.big,
+    x,y,heading, trail,
+    speed:13+Math.random()*9,
+    curSpeed:13,
+    phase:Math.random()*6.28,
+    beatP:Math.random()*6.28,
+    wigT:Math.random()*100,
+    state:'cruise', stateT:2+Math.random()*5,
+    satiated:0, kissT:10+Math.random()*18,
+  };
+}
+let kois=[];
+
+// 沿轨迹取脊点
+function spinePoints(f){
+  const pts=[]; let need=0, di=0, acc=0;
+  const step=f.L/(NSEG-1);
+  let prev={x:f.x,y:f.y};
+  pts.push({x:f.x,y:f.y});
+  let target=step;
+  for(let k=0;k<f.trail.length&&pts.length<NSEG;k++){
+    const p=f.trail[k];
+    const d=Math.hypot(p.x-prev.x,p.y-prev.y);
+    while(acc+d>=target&&pts.length<NSEG){
+      const u=(target-acc)/d;
+      pts.push({x:prev.x+(p.x-prev.x)*u, y:prev.y+(p.y-prev.y)*u});
+      target+=step;
+    }
+    acc+=d; prev=p;
+  }
+  while(pts.length<NSEG){ // 轨迹不足时直线延伸
+    const lp=pts[pts.length-1], lp2=pts[pts.length-2]||{x:lp.x+1,y:lp.y};
+    const dx=lp.x-lp2.x, dy=lp.y-lp2.y, dd=Math.hypot(dx,dy)||1;
+    pts.push({x:lp.x+dx/dd*step, y:lp.y+dy/dd*step});
+  }
+  return pts;
+}
+function smoothClosed(c,pts){
+  c.moveTo(pts[0].x,pts[0].y);
+  for(let i=1;i<pts.length-1;i++){
+    const mx=(pts[i].x+pts[i+1].x)/2, my=(pts[i].y+pts[i+1].y)/2;
+    c.quadraticCurveTo(pts[i].x,pts[i].y,mx,my);
+  }
+  c.lineTo(pts[pts.length-1].x,pts[pts.length-1].y);
+}
+function drawKoi(c,f,t){
+  const sp=spinePoints(f);
+  const L=f.L;
+  // 各节方向与法线
+  const dirs=[],nrm=[];
+  for(let i=0;i<NSEG;i++){
+    const a=sp[Math.max(0,i-1)], b=sp[Math.min(NSEG-1,i+1)];
+    const dx=a.x-b.x, dy=a.y-b.y, dd=Math.hypot(dx,dy)||1;
+    dirs.push({x:dx/dd,y:dy/dd});            // 指向头
+    nrm.push({x:-dy/dd,y:dx/dd});
+  }
+  const lefts=[],rights=[];
+  for(let i=0;i<NSEG;i++){
+    const w=W_PROFILE[i]*L;
+    lefts.push({x:sp[i].x+nrm[i].x*w, y:sp[i].y+nrm[i].y*w});
+    rights.push({x:sp[i].x-nrm[i].x*w, y:sp[i].y-nrm[i].y*w});
+  }
+  const nose={x:sp[0].x+dirs[0].x*L*.045, y:sp[0].y+dirs[0].y*L*.045};
+  const bodyPath=new Path2D();
+  bodyPath.moveTo(nose.x,nose.y);
+  {  // 左舷→尾→右舷
+    let pts=[nose,...lefts];
+    for(let i=1;i<pts.length-1;i++){
+      bodyPath.quadraticCurveTo(pts[i].x,pts[i].y,(pts[i].x+pts[i+1].x)/2,(pts[i].y+pts[i+1].y)/2);
+    }
+    const tailEnd=sp[NSEG-1];
+    bodyPath.quadraticCurveTo(lefts[NSEG-1].x,lefts[NSEG-1].y,tailEnd.x,tailEnd.y);
+    pts=[...rights].reverse();
+    bodyPath.quadraticCurveTo(pts[0].x,pts[0].y,(pts[0].x+pts[1].x)/2,(pts[0].y+pts[1].y)/2);
+    for(let i=1;i<pts.length-1;i++){
+      bodyPath.quadraticCurveTo(pts[i].x,pts[i].y,(pts[i].x+pts[i+1].x)/2,(pts[i].y+pts[i+1].y)/2);
+    }
+    bodyPath.quadraticCurveTo(rights[0].x,rights[0].y,nose.x,nose.y);
+    bodyPath.closePath();
+  }
+  // 尾鳍（飘带，二级滞后摆动）
+  const tail=sp[NSEG-1], td=dirs[NSEG-1];
+  const tSway=Math.sin(f.beatP-1.3)*.38 + Math.sin(t*1.1+f.phase)*.14;
+  const tailLen=L*(f.big?.46:.34);
+  const tn={x:-td.y,y:td.x};
+  c.save();
+  c.shadowColor='rgba(20,40,80,.22)';c.shadowBlur=4;c.shadowOffsetY=3;
+  c.globalAlpha=f.big?.62:.78;
+  c.fillStyle=f.base;
+  for(const s of[1,-1]){
+    const sw=tSway+s*.16;
+    const tip={
+      x:tail.x-td.x*tailLen+tn.x*(sw*tailLen*.8),
+      y:tail.y-td.y*tailLen+tn.y*(sw*tailLen*.8)};
+    c.beginPath();
+    c.moveTo(tail.x,tail.y);
+    c.quadraticCurveTo(
+      tail.x-td.x*tailLen*.5+tn.x*(s*L*.05+sw*tailLen*.35),
+      tail.y-td.y*tailLen*.5+tn.y*(s*L*.05+sw*tailLen*.35),
+      tip.x,tip.y);
+    c.quadraticCurveTo(
+      tail.x-td.x*tailLen*.45+tn.x*(s*L*.018+sw*tailLen*.3),
+      tail.y-td.y*tailLen*.45+tn.y*(s*L*.018+sw*tailLen*.3),
+      tail.x,tail.y);
+    c.fill();
+  }
+  // 胸鳍（月牙）
+  const pf=sp[2], pd=dirs[2], pn=nrm[2];
+  const flut=Math.sin(f.beatP*1.1)*0.12;
+  for(const s of[1,-1]){
+    const bx=pf.x+pn.x*s*W_PROFILE[2]*L*1.05, by=pf.y+pn.y*s*W_PROFILE[2]*L*1.05;
+    const ang=Math.atan2(pd.y,pd.x)+s*(2.25+flut);
+    c.save();
+    c.translate(bx,by);c.rotate(ang);
+    c.beginPath();c.ellipse(L*.085,0,L*.105,L*.038,0,0,Math.PI*2);c.fill();
+    c.restore();
+  }
+  c.restore();
+  // 身体
+  c.save();
+  c.shadowColor='rgba(20,40,80,.3)';c.shadowBlur=5;c.shadowOffsetY=4;
+  c.fillStyle=f.base;
+  c.fill(bodyPath);
+  c.restore();
+  // 斑纹（刚性贴体：沿脊线参数定位）
+  if(f.patches.length){
+    c.save();
+    c.clip(bodyPath);
+    for(const p of f.patches){
+      const fi=p.u*(NSEG-1), i0=Math.min(NSEG-2,Math.floor(fi)), fu=fi-i0;
+      const px=sp[i0].x+(sp[i0+1].x-sp[i0].x)*fu;
+      const py=sp[i0].y+(sp[i0+1].y-sp[i0].y)*fu;
+      const nx=nrm[i0].x, ny=nrm[i0].y;
+      const w=(W_PROFILE[i0]+(W_PROFILE[i0+1]-W_PROFILE[i0])*fu)*L;
+      const cx=px+nx*p.v*w, cy=py+ny*p.v*w;
+      const ang=Math.atan2(dirs[i0].y,dirs[i0].x);
+      c.beginPath();
+      c.ellipse(cx,cy,p.ru*L,p.rv*w,ang,0,Math.PI*2);
+      c.fillStyle=p.col;c.fill();
+    }
+    c.restore();
+  }
+  // 触须 + 眼
+  const hd=dirs[0],hn=nrm[0];
+  c.save();
+  c.strokeStyle='rgba(70,60,50,.45)';c.lineWidth=1.2;c.lineCap='round';
+  for(const s of[1,-1]){
+    const bx=nose.x+hn.x*s*L*.028, by=nose.y+hn.y*s*L*.028;
+    c.beginPath();c.moveTo(bx,by);
+    c.quadraticCurveTo(bx+hd.x*L*.05+hn.x*s*L*.05, by+hd.y*L*.05+hn.y*s*L*.05,
+                       bx+hd.x*L*.03+hn.x*s*L*.09, by+hd.y*L*.03+hn.y*s*L*.09);
+    c.stroke();
+  }
+  c.fillStyle='#2b2b2b';
+  for(const s of[1,-1]){
+    c.beginPath();
+    c.arc(sp[0].x+hd.x*L*.01+hn.x*s*W_PROFILE[0]*L*1.7,
+          sp[0].y+hd.y*L*.01+hn.y*s*W_PROFILE[0]*L*1.7,1.7,0,Math.PI*2);
+    c.fill();
+  }
+  c.restore();
+}
+function updateKoi(f,dt,t){
+  // 状态：巡游 / 滑行（仙气来源之一：时快时慢）
+  f.stateT-=dt;
+  if(f.stateT<=0){
+    if(f.state==='cruise'){ f.state='glide'; f.stateT=2+Math.random()*3; }
+    else { f.state='cruise'; f.stateT=4+Math.random()*6; }
+  }
+  let targetSpeed=f.state==='glide'?6:f.speed;
+  let steer=0;
+  // 觅食
+  if(t>f.satiated&&pellets.length){
+    let best=null,bd=1e9;
+    for(const p of pellets){
+      const d=Math.hypot(p.x-f.x,p.y-f.y);
+      if(d<bd&&d<430){bd=d;best=p;}
+    }
+    if(best){
+      const want=Math.atan2(best.y-f.y,best.x-f.x);
+      let da=((want-f.heading+Math.PI*3)%(Math.PI*2))-Math.PI;
+      steer=da*2.0; targetSpeed=f.speed*2.3;          // 抢食冲刺
+      if(bd<15){ best.hp--; f.satiated=t+9; disturb(best.x,best.y,.4); targetSpeed=5; }
+      else if(bd<55) targetSpeed=f.speed*.8;
+    }
+  } else {
+    // 吻水面（偶发小确幸）
+    f.kissT-=dt;
+    if(f.kissT<=0){ f.kissT=14+Math.random()*20; disturb(f.x,f.y,.5); }
+  }
+  // 漫游
+  f.wigT+=dt;
+  steer+=Math.sin(f.wigT*.4+f.phase*5)*.32;
+  // 摆尾节拍：频率随速度（喂食冲刺时明显加快，滑行时缓慢）
+  f.beatP+=dt*(1.5+f.curSpeed*.15);
+  steer+=Math.sin(f.beatP)*.34*(.5+f.curSpeed/26);
+  // 边界
+  const nd=waterND(f.x,f.y);
+  if(nd>.80){
+    const back=Math.atan2(CY-f.y,CX-f.x);
+    let da=((back-f.heading+Math.PI*3)%(Math.PI*2))-Math.PI;
+    steer+=da*Math.min(3,(nd-.80)*14);
+  }
+  f.heading+=Math.max(-1.4,Math.min(1.4,steer))*dt;
+  // 速度缓动
+  f.curSpeed=f.curSpeed===undefined?targetSpeed:f.curSpeed+(targetSpeed-f.curSpeed)*dt*1.5;
+  const mv=f.curSpeed*dt;
+  f.x+=Math.cos(f.heading)*mv;
+  f.y+=Math.sin(f.heading)*mv;
+  // 轨迹
+  const h0=f.trail[0];
+  if(!h0||Math.hypot(f.x-h0.x,f.y-h0.y)>2.2){
+    f.trail.unshift({x:f.x,y:f.y});
+    if(f.trail.length>70)f.trail.pop();
+  }
+  // 摆尾带起涟漪（在尾部位置，随节拍起伏）
+  const ti=Math.min(f.trail.length-1, Math.round(f.L/2.2));
+  const tp=f.trail[ti];
+  if(tp&&f.curSpeed>11)
+    disturb(tp.x,tp.y,(.018+f.curSpeed*.0017)*Math.abs(Math.cos(f.beatP)));
+}
+
+/* ---------- 投喂 ---------- */
+const MAX_FOOD=5,REGEN_MS=15000,COOLDOWN=600;
+let foodLeft=MAX_FOOD,lastCast=-1e9,lastRegen=0;
+const pellets=[];
+const chip=document.getElementById('foodChip');
+const pelletEls=[];
+for(let i=0;i<MAX_FOOD;i++){
+  const d=document.createElement('div');d.className='pellet';
+  chip.appendChild(d);pelletEls.push(d);
+}
+function refreshChip(){pelletEls.forEach((d,i)=>d.classList.toggle('used',i>=foodLeft));}
+refreshChip();
+function castFood(x,y,t){
+  if(foodLeft<=0||t*1000-lastCast<COOLDOWN)return false;
+  lastCast=t*1000;foodLeft--;refreshChip();
+  pellets.push({x,y,t0:t,hp:3});
+  return true;
+}
+function drawPellets(c,t){
+  for(let i=pellets.length-1;i>=0;i--){
+    const p=pellets[i],age=t-p.t0;
+    if(age>8||p.hp<=0){pellets.splice(i,1);continue;}
+    const sink=Math.min(age/8,1);
+    c.save();
+    c.globalAlpha=1-Math.pow(sink,3);
+    c.shadowColor='rgba(20,40,80,.3)';c.shadowBlur=3;c.shadowOffsetY=2;
+    c.fillStyle='#dfc08c';
+    c.beginPath();c.arc(p.x,p.y,4.2*(1-sink*.4),0,Math.PI*2);c.fill();
+    c.shadowColor='transparent';
+    c.strokeStyle='rgba(255,255,255,.4)';
+    for(let k=0;k<2;k++){
+      const bu=(age*.6+k*.5)%1;
+      c.globalAlpha=(1-bu)*.5*(1-sink);
+      c.beginPath();c.arc(p.x+(k?6:-5),p.y-bu*22,2,0,Math.PI*2);c.stroke();
+    }
+    c.restore();
+  }
+}
+
+/* ---------- 高度场水波模拟（CPU） ---------- */
+let gw=0,gh=0,cell=7;
+let hA=null,hB=null,maskGrid=null,hBytes=null;
+const DAMP=.962;
+function initSim(){
+  gw=Math.max(8,Math.round(W/cell));
+  gh=Math.max(8,Math.round(H/cell));
+  hA=new Float32Array(gw*gh);
+  hB=new Float32Array(gw*gh);
+  hBytes=new Uint8Array(gw*gh);
+  maskGrid=new Float32Array(gw*gh);
+  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){
+    const nd=waterND((x+.5)*cell,(y+.5)*cell);
+    // 软边缘：0.97→1 渐隐
+    maskGrid[y*gw+x]=nd<.965?1:nd<1?(1-nd)/.035:0;
+  }
+}
+function disturb(x,y,amp){
+  const gx=x/cell,gy=y/cell;
+  const x0=Math.max(1,Math.floor(gx-2)),x1=Math.min(gw-2,Math.ceil(gx+2));
+  const y0=Math.max(1,Math.floor(gy-2)),y1=Math.min(gh-2,Math.ceil(gy+2));
+  for(let yy=y0;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++){
+    const d2=(xx-gx)*(xx-gx)+(yy-gy)*(yy-gy);
+    if(d2<5) hA[yy*gw+xx]-=amp*Math.exp(-d2*.7)*maskGrid[yy*gw+xx];
+  }
+}
+function stepSim(){
+  for(let y=1;y<gh-1;y++){
+    const row=y*gw;
+    for(let x=1;x<gw-1;x++){
+      const i=row+x;
+      const n=(hA[i-1]+hA[i+1]+hA[i-gw]+hA[i+gw])*.5-hB[i];
+      hB[i]=n*DAMP*maskGrid[i];
+    }
+  }
+  const tmp=hA;hA=hB;hB=tmp;
+  for(let i=0;i<gw*gh;i++){
+    let v=128+hA[i]*88;
+    hBytes[i]=v<0?0:v>255?255:v;
+  }
+}
+
+/* ---------- WebGL 折射渲染 ---------- */
+let gl=null,prog=null,texScene=null,texH=null,texMask=null,fallback2d=null;
+const VS=`attribute vec2 aPos;varying vec2 vUv;
+void main(){vUv=vec2(aPos.x*.5+.5,.5-aPos.y*.5);gl_Position=vec4(aPos,0.,1.);}`;
+const FS=`precision mediump float;varying vec2 vUv;
+uniform sampler2D uScene,uH,uMask;uniform vec2 uTexel;
+void main(){
+  float m=texture2D(uMask,vUv).r;
+  float hl=texture2D(uH,vUv-vec2(uTexel.x,0.)).r;
+  float hr=texture2D(uH,vUv+vec2(uTexel.x,0.)).r;
+  float hu=texture2D(uH,vUv-vec2(0.,uTexel.y)).r;
+  float hd=texture2D(uH,vUv+vec2(0.,uTexel.y)).r;
+  vec2 g=vec2(hr-hl,hd-hu);
+  vec2 uv=vUv+g*.055*m;
+  vec4 c=texture2D(uScene,uv);
+  c.rgb+=(g.x+g.y)*.9*m;
+  gl_FragColor=c;
+}`;
+function mkTex(){
+  const t=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  return t;
+}
+function initGL(){
+  gl=glCanvas.getContext('webgl',{antialias:false,depth:false});
+  if(!gl){fallback2d=glCanvas.getContext('2d');return;}
+  const sh=(type,src)=>{
+    const s=gl.createShader(type);
+    gl.shaderSource(s,src);gl.compileShader(s);
+    if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw gl.getShaderInfoLog(s);
+    return s;
+  };
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+  prog=gl.createProgram();
+  gl.attachShader(prog,sh(gl.VERTEX_SHADER,VS));
+  gl.attachShader(prog,sh(gl.FRAGMENT_SHADER,FS));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  const buf=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  const loc=gl.getAttribLocation(prog,'aPos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  texScene=mkTex();texH=mkTex();texMask=mkTex();
+  gl.uniform1i(gl.getUniformLocation(prog,'uScene'),0);
+  gl.uniform1i(gl.getUniformLocation(prog,'uH'),1);
+  gl.uniform1i(gl.getUniformLocation(prog,'uMask'),2);
+}
+function uploadMask(){
+  if(!gl)return;
+  const bytes=new Uint8Array(gw*gh);
+  for(let i=0;i<gw*gh;i++)bytes[i]=maskGrid[i]*255;
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D,texMask);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,gw,gh,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,bytes);
+  gl.uniform2f(gl.getUniformLocation(prog,'uTexel'),1/gw,1/gh);
+}
+function renderGL(){
+  if(!gl){fallback2d.drawImage(scene,0,0);return;}
+  gl.viewport(0,0,W,H);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,texScene);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,scene);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D,texH);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.LUMINANCE,gw,gh,0,gl.LUMINANCE,gl.UNSIGNED_BYTE,hBytes);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+}
+
+/* ---------- 场景合成 ---------- */
+const scene=document.createElement('canvas');
+const sctx=scene.getContext('2d');
+let last=perf();
+function frame(){
+  const t=perf(),dt=Math.min(t-last,.05);last=t;
+  // 食物回复
+  if(foodLeft<MAX_FOOD&&t*1000-lastRegen>REGEN_MS){
+    foodLeft++;lastRegen=t*1000;refreshChip();
+  }else if(foodLeft===MAX_FOOD)lastRegen=t*1000;
+
+  updateShishi(dt,t);
+  stepSim();
+
+  sctx.clearRect(0,0,W,H);
+  sctx.drawImage(bgCanvas,0,0);
+  updateDrawLeaves(sctx,dt,t);
+  for(const f of kois){updateKoi(f,dt,t);drawKoi(sctx,f,t);}
+  drawPellets(sctx,t);
+  renderGL();
+
+  // 上层（不受扭曲）：荷叶/枫枝 + 鹿威し
+  ovCtx.clearRect(0,0,W,H);
+  ovCtx.drawImage(padCanvas,0,0);
+  drawShishi(ovCtx);
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 交互 ---------- */
+let hinted=false;
+addEventListener('pointerdown',e=>{
+  const x=e.clientX,y=e.clientY,t=perf();
+  if(waterND(x,y)>1)return;
+  disturb(x,y,1.25);
+  castFood(x,y,t);
+  if(!hinted){hinted=true;document.getElementById('hint').classList.add('fade');}
+});
+
+function resize(){
+  W=innerWidth;H=innerHeight;
+  glCanvas.width=W;glCanvas.height=H;
+  ovCanvas.width=W;ovCanvas.height=H;
+  scene.width=W;scene.height=H;
+  CX=W/2;CY=H/2;RX=W*.405;RY=H*.40;   // 超椭圆对角外扩约 15%，整体更方圆、填得更满
+  renderBackground();renderPads();placeShishi();initSim();
+  if(gl===null&&fallback2d===null)initGL();
+  uploadMask();
+}
+addEventListener('resize',resize);
+resize();
+kois=Array.from({length:7},(_,i)=>makeKoi(i));
+initLeaves();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
